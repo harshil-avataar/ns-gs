@@ -95,6 +95,10 @@ class Viewer:
             websocket_port = self.config.websocket_port
         self.log_filename.parent.mkdir(exist_ok=True)
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> 9e33b437dff6df5a9579c04b1eba46640df88a96
         # viewer specific variables
         self.output_type_changed = True
         self.output_split_type_changed = True
@@ -105,8 +109,11 @@ class Viewer:
 
         self.viser_server = viser.ViserServer(host=config.websocket_host, port=websocket_port, share=share)
         # Set the name of the URL either to the share link if available, or the localhost
+<<<<<<< HEAD
         # TODO: we should revisit this once a public API for share URL status is exposed in viser.
         # https://github.com/nerfstudio-project/viser/issues/124
+=======
+>>>>>>> 9e33b437dff6df5a9579c04b1eba46640df88a96
         if share:
             assert self.viser_server._share_tunnel is not None
             while self.viser_server._share_tunnel._shared_state["status"] == "connecting":
@@ -249,25 +256,28 @@ class Viewer:
                 self.camera_handles[idx].visible = visible
 
     def update_camera_poses(self):
+        #TODO this fn accounts for like ~5% of total train time
         # Update the train camera locations based on optimization
         assert self.camera_handles is not None
-        idxs = list(self.camera_handles.keys())
         if hasattr(self.pipeline.datamanager, "train_camera_optimizer"):
             camera_optimizer = self.pipeline.datamanager.train_camera_optimizer
-        else:
+        elif hasattr(self.pipeline.model, "camera_optimizer"):
             camera_optimizer = self.pipeline.model.camera_optimizer
+        else:
+            return
+        idxs = list(self.camera_handles.keys())
         with torch.no_grad():
             assert isinstance(camera_optimizer, CameraOptimizer)
             c2ws_delta = camera_optimizer(torch.tensor(idxs, device=camera_optimizer.device)).cpu().numpy()
-        for idx in idxs:
+        for i, key in enumerate(idxs):
             # both are numpy arrays
-            c2w_orig = self.original_c2w[idx]
-            c2w_delta = c2ws_delta[idx, ...]
+            c2w_orig = self.original_c2w[key]
+            c2w_delta = c2ws_delta[i, ...]
             c2w = c2w_orig @ np.concatenate((c2w_delta, np.array([[0, 0, 0, 1]])), axis=0)
             R = vtf.SO3.from_matrix(c2w[:3, :3])  # type: ignore
             R = R @ vtf.SO3.from_x_radians(np.pi)
-            self.camera_handles[idx].position = c2w[:3, 3] * VISER_NERFSTUDIO_SCALE_RATIO
-            self.camera_handles[idx].wxyz = R.wxyz
+            self.camera_handles[key].position = c2w[:3, 3] * VISER_NERFSTUDIO_SCALE_RATIO
+            self.camera_handles[key].wxyz = R.wxyz
 
     def _interrupt_render(self, _) -> None:
         """Interrupt current render."""
@@ -378,7 +388,6 @@ class Viewer:
         # this stops training while moving to make the response smoother
         while time.time() - self.last_move_time < 0.1:
             time.sleep(0.05)
-        # self.render_statemachine.action(RenderAction("static", self.camera_state))
         if self.trainer is not None and self.trainer.training_state == "training" and self.train_util != 1:
             if (
                 EventName.TRAIN_RAYS_PER_SEC.value in GLOBAL_BUFFER["events"]
