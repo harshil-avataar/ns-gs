@@ -66,3 +66,18 @@ s-train gaussian-splatting --experiment-name <exp_name> colmap --colmap_path spa
 ns-viewer --load-config <.../config.yml> 
 ```
 
+
+### Installation Issues
+If you recieve an assertion error like the following: 
+```
+... /nerfstudio/lib/python3.8/site-packages/torch/autograd/function.py", line 506, in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+  File "/opt/conda/envs/nerfstudio/lib/python3.8/site-packages/gsplat/sh.py", line 39, in forward
+    assert coeffs.shape
+```
+
+solution reinstall gsplat from source:
+
+```bash
+pip install git+https://github.com/nerfstudio-project/gsplat
+```
