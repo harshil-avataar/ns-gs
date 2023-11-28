@@ -95,10 +95,6 @@ class Viewer:
             websocket_port = self.config.websocket_port
         self.log_filename.parent.mkdir(exist_ok=True)
 
-<<<<<<< HEAD
-=======
-
->>>>>>> 9e33b437dff6df5a9579c04b1eba46640df88a96
         # viewer specific variables
         self.output_type_changed = True
         self.output_split_type_changed = True
@@ -109,11 +105,6 @@ class Viewer:
 
         self.viser_server = viser.ViserServer(host=config.websocket_host, port=websocket_port, share=share)
         # Set the name of the URL either to the share link if available, or the localhost
-<<<<<<< HEAD
-        # TODO: we should revisit this once a public API for share URL status is exposed in viser.
-        # https://github.com/nerfstudio-project/viser/issues/124
-=======
->>>>>>> 9e33b437dff6df5a9579c04b1eba46640df88a96
         if share:
             assert self.viser_server._share_tunnel is not None
             while self.viser_server._share_tunnel._shared_state["status"] == "connecting":
@@ -256,7 +247,7 @@ class Viewer:
                 self.camera_handles[idx].visible = visible
 
     def update_camera_poses(self):
-        #TODO this fn accounts for like ~5% of total train time
+        # TODO this fn accounts for like ~5% of total train time
         # Update the train camera locations based on optimization
         assert self.camera_handles is not None
         if hasattr(self.pipeline.datamanager, "train_camera_optimizer"):
