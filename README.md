@@ -58,7 +58,7 @@ The following will train a _gs_ model, our recommended model for real world scen
 # Download some test data:
 # ns-download-data nerfstudio --capture-name=poster
 # Train model
-s-train gaussian-splatting --experiment-name <exp_name> colmap --colmap_path sparse/0  --data <data_path>
+ns-train gaussian-splatting --experiment-name <exp_name> colmap --colmap_path sparse/0  --data /data/
 ```
 ### viweing GS model 
 
