@@ -170,11 +170,13 @@ class ColmapDataParser(DataParser):
         return out
 
     def _get_image_indices(self, image_filenames, split):
+        # exit()
         has_split_files_spec = (
             (self.config.data / "train_list.txt").exists()
             or (self.config.data / "test_list.txt").exists()
-            or (self.config.data / "validation_list.txt").exists()
+            or (self.config.data / "val_list.txt").exists()  # fix filename
         )
+        print((self.config.data / f"{split}_list.txt"), (self.config.data / f"{split}_list.txt").exists())
         if (self.config.data / f"{split}_list.txt").exists():
             CONSOLE.log(f"Using {split}_list.txt to get indices for split {split}.")
             with (self.config.data / f"{split}_list.txt").open("r", encoding="utf8") as f:
@@ -190,6 +192,7 @@ class ColmapDataParser(DataParser):
             indices = [i for i, path in enumerate(image_filenames) if path in split_filenames]
             CONSOLE.log(f"[yellow] Dataset is overriding {split}_indices to {indices}")
             indices = np.array(indices, dtype=np.int32)
+
         elif has_split_files_spec:
             raise RuntimeError(f"The dataset's list of filenames for split {split} is missing.")
         else:
