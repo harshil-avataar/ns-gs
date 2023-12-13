@@ -40,11 +40,14 @@ from nerfstudio.data.datamanagers.base_datamanager import (
     DataManagerConfig,
     VanillaDataManager,
 )
+from nerfstudio.utils.rich_utils import CONSOLE
+
 from nerfstudio.data.datamanagers.parallel_datamanager import ParallelDataManager
 from nerfstudio.data.datamanagers.full_images_datamanager import FullImageDatamanager
 from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttributes
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import profiler
+import pdb
 
 
 def module_wrapper(ddp_or_model: Union[DDP, Model]) -> Model:
@@ -187,6 +190,16 @@ class Pipeline(nn.Module):
 
         Args:
             step: current training step
+            output_path: optional path to save rendered images to
+            get_std: Set True if you want to return std with the mean metric.
+        """
+
+    @abstractmethod
+    @profiler.time_function
+    def get_average_eval_image_and_metrics_hb(self, output_path: Optional[Path] = None):
+        """Iterate over all the images in the eval dataset and get the average.
+
+        Args:
             output_path: optional path to save rendered images to
             get_std: Set True if you want to return std with the mean metric.
         """
@@ -338,7 +351,7 @@ class VanillaPipeline(Pipeline):
         from the DataManager and feed it to the model's forward function
 
         Args:
-            step: current iteration step
+            step: current iteration step1
         """
         self.eval()
         image_idx, camera_ray_bundle, batch = self.datamanager.next_eval_image(step)
@@ -373,7 +386,8 @@ class VanillaPipeline(Pipeline):
         """
         self.eval()
         metrics_dict_list = []
-        assert isinstance(self.datamanager, (VanillaDataManager, ParallelDataManager,FullImageDatamanager))
+
+        assert isinstance(self.datamanager, (VanillaDataManager, ParallelDataManager, FullImageDatamanager))
         num_images = len(self.datamanager.fixed_indices_eval_dataloader)
         with Progress(
             TextColumn("[progress.description]{task.description}"),
@@ -388,7 +402,7 @@ class VanillaPipeline(Pipeline):
                 inner_start = time()
                 height, width = camera_ray_bundle.shape
                 num_rays = height * width
-                outputs = self.model.get_outputs_for_camera_ray_bundle(camera_ray_bundle)
+                outputs = self.model.get_outputs_for_camera_ray_bundle(None, camera_ray_bundle)
                 metrics_dict, images_dict = self.model.get_image_metrics_and_images(outputs, batch)
 
                 if output_path is not None:
@@ -420,6 +434,40 @@ class VanillaPipeline(Pipeline):
                 )
         self.train()
         return metrics_dict
+
+    def get_average_eval_image_and_metrics_hb(self, output_path: Optional[Path] = None):
+        self.eval()
+        metrics_dict_list = []
+        images_dict_list = []
+        eval_images_len = len(self.datamanager.eval_dataset)
+        print(eval_images_len)
+        for _ in range(eval_images_len):
+            image_idx, camera_ray_bundle, batch = self.datamanager.next_eval_image(0)
+            outputs = self.model.get_outputs_for_camera_ray_bundle(None, camera=camera_ray_bundle)
+            metrics_dict, images_dict = self.model.get_image_metrics_and_images(outputs, batch)
+            assert "image_idx" not in metrics_dict
+            metrics_dict["image_idx"] = image_idx
+            metrics_dict_list.append(metrics_dict)
+            images_dict_list.append(images_dict)
+            print(image_idx)
+
+        print(self.datamanager.eval_dataset.image_filenames)
+        if output_path is not None:
+            for id, image_dict in enumerate(images_dict_list):
+                # print(self.datamanager.eval_dataset.image_filenames[id].name, )
+
+                Image.fromarray((image_dict["img"] * 255).byte().cpu().numpy()).save(
+                    output_path / self.datamanager.eval_dataset.image_filenames[metrics_dict_list[id]["image_idx"]].name
+                )
+
+        metrics_dict = {}
+        for key in metrics_dict_list[0].keys():
+            if key not in ["image_idx", "num_rays"]:
+                metrics_dict[key] = float(
+                    torch.mean(torch.tensor([metrics_dict[key] for metrics_dict in metrics_dict_list]))
+                )
+
+        return metrics_dict, metrics_dict_list, images_dict_list
 
     def load_pipeline(self, loaded_state: Dict[str, Any], step: int) -> None:
         """Load the checkpoint from the given path

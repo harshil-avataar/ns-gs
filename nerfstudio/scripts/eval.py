@@ -27,37 +27,61 @@ import tyro
 
 from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.utils.rich_utils import CONSOLE
+import numpy as np
+from PIL import Image
 
 
 @dataclass
 class ComputePSNR:
     """Load a checkpoint, compute some PSNR metrics, and save it to a JSON file."""
 
-    # Path to config YAML file.
-    load_config: Path
-    # Name of the output file.
-    output_path: Path = Path("output.json")
+    # Path to config YAML / or data path file.
+    load_config: Optional[Path] = None  # overloaded based on dataset
+    # Name of the output file
+    output_dir: Path = Path("results/")
+    #
+    output_file: Path = Path("results.json")
     # Optional path to save rendered outputs to.
-    render_output_path: Optional[Path] = None
+    # Optional checkpoint path for the same dataset
+    checkpoint_path: Optional[Path] = None
+
+    # def override_config(self):
 
     def main(self) -> None:
         """Main function."""
-        config, pipeline, checkpoint_path, _ = eval_setup(self.load_config)
-        assert self.output_path.suffix == ".json"
-        if self.render_output_path is not None:
+        # setup
+
+        CONSOLE.log("[bold green] Processing NerfStudio Checkpoint")
+
+        if self.checkpoint_path is not None:
+            if self.checkpoint_path.exists():
+                pass
+            else:
+                CONSOLE.log("[yellow] Checkpoint File is not valid, loading default checkpoint")
+                self.checkpoint_path = None
+
+        config, pipeline, checkpoint_path, _ = eval_setup(self.load_config, self.checkpoint_path)
+        assert self.output_file.suffix == ".json"
+
+        self.render_output_path = Path(self.output_dir / "images/")
+        if not self.render_output_path.exists():
             self.render_output_path.mkdir(parents=True)
-        metrics_dict = pipeline.get_average_eval_image_metrics(output_path=self.render_output_path, get_std=True)
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        # Get the output and define the names to save to
+
+        output_path = Path(self.output_dir / self.output_file)
+        output = pipeline.get_average_eval_image_and_metrics_hb(output_path=self.render_output_path)
+        # self.output_path.parent.mkdir(parents=True, exist_ok=True)
+
         benchmark_info = {
             "experiment_name": config.experiment_name,
             "method_name": config.method_name,
-            "checkpoint": str(checkpoint_path),
-            "results": metrics_dict,
+            "config_path": str(self.load_config) if self.load_config is not None else "Generated",
+            "checkpoint_path": str(checkpoint_path),
+            "results": output[0],
+            "results_all": output[1],
         }
         # Save output to output file
-        self.output_path.write_text(json.dumps(benchmark_info, indent=2), "utf8")
-        CONSOLE.print(f"Saved results to: {self.output_path}")
+        output_path.write_text(json.dumps(benchmark_info, indent=2), "utf8")
+        CONSOLE.print(f"Saved results to: {output_path}")
 
 
 def entrypoint():

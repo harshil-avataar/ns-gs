@@ -27,14 +27,16 @@ import torch
 from PIL import Image
 from rich.prompt import Confirm
 
+from nerfstudio.utils.io import load_from_json
 from nerfstudio.cameras import camera_utils
-from nerfstudio.cameras.cameras import CAMERA_MODEL_TO_TYPE, Cameras
+from nerfstudio.cameras.cameras import CAMERA_MODEL_TO_TYPE, Cameras, CameraType
 from nerfstudio.data.dataparsers.base_dataparser import DataParser, DataParserConfig, DataparserOutputs
 from nerfstudio.data.scene_box import SceneBox
 from nerfstudio.data.utils import colmap_parsing_utils as colmap_utils
 from nerfstudio.process_data.colmap_utils import parse_colmap_camera_params
 from nerfstudio.utils.scripts import run_command
 from nerfstudio.utils.rich_utils import CONSOLE, status
+import imageio
 
 MAX_AUTO_RESOLUTION = 1600
 
@@ -123,6 +125,7 @@ class ColmapDataParser(DataParser):
         for cam_id, cam_data in cam_id_to_camera.items():
             cameras[cam_id] = parse_colmap_camera_params(cam_data)
 
+
         # Parse frames
         for im_id, im_data in im_id_to_image.items():
             # NB: COLMAP uses Eigen / scalar-first quaternions
@@ -169,6 +172,86 @@ class ColmapDataParser(DataParser):
         assert len(frames) > 0, "No images found in the colmap model"
         return out
 
+    def _custom_blender_dataloader(self, split, path):
+        # split = 'train'
+        meta = load_from_json(path / f"transforms_{split}.json")
+        image_filenames = []
+        poses = []
+        distort = []
+        fx,fy,cx,cy,height,width = [],[],[],[],[],[]
+
+        for frame in meta["frames"]:
+            fname = path / Path(frame["file_path"].replace("./", "") + ".png")
+            image_filenames.append(fname)
+            poses.append(np.array(frame["transform_matrix"]))
+            img_0 = imageio.v2.imread(fname)
+            h, w = img_0.shape[:2]
+            camera_angle_x = float(meta["camera_angle_x"])
+            f = 0.5 * w / np.tan(0.5 * camera_angle_x)
+            fx.append(f)
+            fy.append(f)
+            cx.append(w / 2.0)
+            cy.append(h / 2.0)
+            height.append(h)
+            width.append(w)
+
+            distort.append(
+                camera_utils.get_distortion_params(
+                    k1=0.0,
+                    k2=0.0,
+                    k3=0.0,
+                    k4=0.0,
+                    p1=0.0,
+                    p2=0.0,
+                )
+            )
+        poses = np.array(poses).astype(np.float32)
+        camera_to_world = torch.from_numpy(poses[:, :3])  # camera to world transform
+
+        # in x,y,z order
+        camera_to_world[..., 3] *= self.config.scale_factor
+        scene_box = SceneBox(aabb=torch.tensor([[-1.5, -1.5, -1.5], [1.5, 1.5, 1.5]], dtype=torch.float32))
+
+        metadata = {}
+        if self.config.load_3D_points:
+            num_pts = 100000
+            xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+            shs = (255 * np.random.random((num_pts, 3))).astype(np.uint8) 
+            metadata.update({
+            "points3D_xyz": torch.tensor(xyz, dtype = torch.float32),
+            "points3D_rgb": torch.tensor(shs)})
+
+        fx = torch.tensor(fx, dtype=torch.float32)
+        fy = torch.tensor(fy, dtype=torch.float32)
+        cx = torch.tensor(cx, dtype=torch.float32)
+        cy = torch.tensor(cy, dtype=torch.float32)
+        height = torch.tensor(height, dtype=torch.int32)
+        width = torch.tensor(width, dtype=torch.int32)
+        distortion_params = torch.stack(distort, dim=0)
+
+        cameras = Cameras(
+            camera_to_worlds=camera_to_world,
+            fx=fx,
+            fy=fy,
+            cx=cx,
+            cy=cy,
+            height = height,
+            width = width,
+            distortion_params= distortion_params,
+            camera_type=CameraType.PERSPECTIVE,
+        )
+
+        dataparser_outputs = DataparserOutputs(
+            image_filenames=image_filenames,
+            cameras=cameras,
+            scene_box=scene_box,
+            dataparser_transform = torch.tensor(np.eye(4)[:3,:],dtype = torch.float32),
+            dataparser_scale=self.config.scale_factor,
+            metadata = {**metadata}
+        )
+        
+        return dataparser_outputs
+
     def _get_image_indices(self, image_filenames, split):
         # exit()
         has_split_files_spec = (
@@ -184,6 +267,7 @@ class ColmapDataParser(DataParser):
             # Validate split first
             split_filenames = set(self.config.data / self.config.images_path / x for x in filenames)
             unmatched_filenames = split_filenames.difference(image_filenames)
+
             if unmatched_filenames:
                 raise RuntimeError(
                     f"Some filenames for split {split} were not found: {set(map(str, unmatched_filenames))}."
@@ -217,9 +301,12 @@ class ColmapDataParser(DataParser):
     def _generate_dataparser_outputs(self, split: str = "train", **kwargs):
         assert self.config.data.exists(), f"Data directory {self.config.data} does not exist."
         colmap_path = self.config.data / self.config.colmap_path
-        assert colmap_path.exists(), f"Colmap path {colmap_path} does not exist."
-
-        meta = self._get_all_images_and_cameras(colmap_path)
+        if colmap_path.exists() : 
+            meta = self._get_all_images_and_cameras(colmap_path)
+        else:
+            CONSOLE.log(f"Colmap path {colmap_path} does not exist.")
+            return self._custom_blender_dataloader(split, self.config.data )
+        
         camera_type = CAMERA_MODEL_TO_TYPE[meta["camera_model"]]
 
         image_filenames = []
@@ -355,6 +442,7 @@ class ColmapDataParser(DataParser):
             metadata={
                 "depth_filenames": depth_filenames if len(depth_filenames) > 0 else None,
                 "depth_unit_scale_factor": self.config.depth_unit_scale_factor,
+                'transform_matrix': transform_matrix,
                 **metadata,
             },
         )

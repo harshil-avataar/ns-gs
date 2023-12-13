@@ -94,28 +94,30 @@ def projection_matrix(znear, zfar, fovx, fovy, device="cpu"):
 class GaussianSplattingModelConfig(ModelConfig):
     """Gaussian Splatting Model Config"""
 
+    # og:  = 0.005
+
     _target: Type = field(default_factory=lambda: GaussianSplattingModel)
-    warmup_length: int = 500
+    warmup_length: int = 500  # densify_from in og: same
     """period of steps where refinement is turned off"""
-    refine_every: int = 100
+    refine_every: int = 100  # densification iterval: same
     """period of steps where gaussians are culled and densified"""
-    resolution_schedule: int = 250
+    resolution_schedule: int = 250  # not present
     """training starts at 1/d resolution, every n steps this is doubled"""
-    num_downscales: int = 2
+    num_downscales: int = 2  # not present
     """at the beginning, resolution is 1/2^d, where d is this number"""
     cull_alpha_thresh: float = 0.1
     """threshold of opacity for culling gaussians"""
     cull_scale_thresh: float = 0.5
     """threshold of scale for culling gaussians"""
-    reset_alpha_every: int = 30
+    reset_alpha_every: int = 30  # 3000 in original code.
     """Every this many refinement steps, reset the alpha"""
-    densify_grad_thresh: float = 0.0002
-    """threshold of positional gradient norm for densifying gaussians"""
-    densify_size_thresh: float = 0.01
+    densify_grad_thresh: float = 0.0002  # same
+    """threshold of positional gradient norm for  densifying gaussians"""
+    densify_size_thresh: float = 0.01  # percentage split
     """below this size, gaussians are *duplicated*, otherwise split"""
     n_split_samples: int = 2
     """number of samples to split gaussians into"""
-    sh_degree_interval: int = 1000
+    sh_degree_interval: int = 1000  # same
     """every n intervals turn on another sh degree"""
     cull_screen_size: float = 0.15
     """if a gaussian is more than this percent of screen space, cull it"""
@@ -129,12 +131,13 @@ class GaussianSplattingModelConfig(ModelConfig):
     """number of extra points to add to the model in addition to sfm points, randomly distributed"""
     ssim_lambda: float = 0.2
     """weight of ssim loss"""
-    stop_split_at: int = 15000
+    stop_split_at: int = 15000  # densify_until_iter
     """stop splitting at this step"""
     sh_degree: int = 3
     """maximum degree of spherical harmonics to use"""
     camera_optimizer: CameraOptimizerConfig = CameraOptimizerConfig(mode="off")
     """camera optimizer config"""
+    eval_og: bool = False 
 
 
 class GaussianSplattingModel(Model):
@@ -147,6 +150,8 @@ class GaussianSplattingModel(Model):
     config: GaussianSplattingModelConfig
 
     def __init__(self, *args, **kwargs):
+
+        self.transform_matrix = kwargs['metadata']['transform_matrix']
         if "seed_points" in kwargs:
             self.seed_pts = kwargs["seed_points"]
         else:
@@ -163,9 +168,11 @@ class GaussianSplattingModel(Model):
         self.max_2Dsize = None
         distances, _ = self.k_nearest_sklearn(self.means.data, 3)
         distances = torch.from_numpy(distances)
+
         # find the average of the three nearest neighbors for each point and use that as the scale
         avg_dist = distances.mean(dim=-1, keepdim=True)
         self.scales = torch.nn.Parameter(torch.log(avg_dist.repeat(1, 3)))
+
         self.quats = torch.nn.Parameter(random_quat_tensor(self.num_points))
         dim_sh = num_sh_bases(self.config.sh_degree)
 
@@ -219,6 +226,7 @@ class GaussianSplattingModel(Model):
             torch.zeros(newp, num_sh_bases(self.config.sh_degree), 3, device=self.device)
         )
         super().load_state_dict(dict, **kwargs)
+        # self.save_ply()
 
     def k_nearest_sklearn(self, x: torch.Tensor, k: int):
         """
@@ -258,7 +266,7 @@ class GaussianSplattingModel(Model):
         optimizer.state[new_params[0]] = param_state
 
     def dup_in_optim(self, optimizer, dup_mask, new_params, n=2):
-        """adds the parameters to the optimizer"""
+        """adds the parameters to the optimizer : SAME as 3DGS expect this 'n' factor here"""
         param = optimizer.param_groups[0]["params"][0]
         param_state = optimizer.state[param]
         repeat_dims = (n,) + tuple(1 for _ in range(param_state["exp_avg"].dim() - 1))
@@ -318,12 +326,18 @@ class GaussianSplattingModel(Model):
                     # then we densify
                     avg_grad_norm = (
                         (self.xys_grad_norm / self.vis_counts) * 0.5 * max(self.last_size[0], self.last_size[1])
-                    )
+                    )  # vis_counts is self.denom, why 0.5 mult? last term is max(H,W)
+                    # print(avg_grad_norm)
+                    # hb: this norm seems different
+
                     high_grads = (avg_grad_norm > self.config.densify_grad_thresh).squeeze()
                     splits = (self.scales.exp().max(dim=-1).values > self.config.densify_size_thresh).squeeze()
+                    # exp here is the scaling activation.
+
                     if self.step < self.config.stop_screen_size_at:
                         splits |= (self.max_2Dsize > self.config.split_screen_size).squeeze()
-                    splits &= high_grads
+                    splits &= high_grads  # same as 3DGS
+
                     nsamps = self.config.n_split_samples
                     (
                         split_means,
@@ -337,6 +351,8 @@ class GaussianSplattingModel(Model):
                     dups &= high_grads
                     dup_means, dup_colors, dup_opacities, dup_scales, dup_quats = self.dup_gaussians(dups)
                     self.means = Parameter(torch.cat([self.means.detach(), split_means, dup_means], dim=0))
+
+                    # where do they add the gradient to the means of the gaussians ?
                     self.colors_all = Parameter(torch.cat([self.colors_all.detach(), split_colors, dup_colors], dim=0))
 
                     self.opacities = Parameter(
@@ -408,25 +424,29 @@ class GaussianSplattingModel(Model):
 
     def split_gaussians(self, split_mask, samps):
         """
-        This function splits gaussians that are too large
+        This function splits gaussians that are too large. Same as 3DGS
         """
 
         n_splits = split_mask.sum().item()
         print(f"Splitting {split_mask.sum().item()/self.num_points} gaussians: {n_splits}/{self.num_points}")
+
         centered_samples = torch.randn((samps * n_splits, 3), device=self.device)  # Nx3 of axis-aligned scales
         scaled_samples = (
             torch.exp(self.scales[split_mask].repeat(samps, 1)) * centered_samples
         )  # how these scales are rotated
+        # same thing is done in 3DGS.
+
         quats = self.quats[split_mask] / self.quats[split_mask].norm(dim=-1, keepdim=True)  # normalize them first
         rots = quat_to_rotmat(quats.repeat(samps, 1))  # how these scales are rotated
         rotated_samples = torch.bmm(rots, scaled_samples[..., None]).squeeze()
-        new_means = rotated_samples + self.means[split_mask].repeat(samps, 1)
+        new_means = rotated_samples + self.means[split_mask].repeat(samps, 1)  # same
+
         # step 2, sample new colors
         new_colors_all = self.colors_all[split_mask].repeat(samps, 1, 1)
         # step 3, sample new opacities
         new_opacities = self.opacities[split_mask].repeat(samps, 1)
         # step 4, sample new scales
-        size_fac = 1.6
+        size_fac = 1.6  # 3DGS divides by 0.8. There is a 2x diff.
         new_scales = torch.log(torch.exp(self.scales[split_mask]) / size_fac).repeat(samps, 1)
         self.scales[split_mask] = torch.log(torch.exp(self.scales[split_mask]) / size_fac)
         # step 5, sample new quats
@@ -435,7 +455,7 @@ class GaussianSplattingModel(Model):
 
     def dup_gaussians(self, dup_mask):
         """
-        This function duplicates gaussians that are too small
+        This function duplicates gaussians that are too small. Same as 3DGS.
         """
         n_dups = dup_mask.sum().item()
         print(f"Duplicating {dup_mask.sum().item()/self.num_points} gaussians: {n_dups}/{self.num_points}")
@@ -584,19 +604,29 @@ class GaussianSplattingModel(Model):
             W,
             tile_bounds,
         )
+        # self.xys are not zeros, as they are used to passed to the rasterizer
+        # as it is passed via python, we need real values. 3DGS doesnt' have this dependency
 
         # Important to allow xys grads to populate properly
+
         if self.training:
-            self.xys.retain_grad()
+            if self.xys.requires_grad:
+                self.xys.retain_grad()
         if self.config.sh_degree > 0:
             viewdirs = means_crop.detach() - camera.camera_to_worlds.detach()[..., :3, 3]  # (N, 3)
             viewdirs = viewdirs / viewdirs.norm(dim=-1, keepdim=True)
             n = min(self.step // self.config.sh_degree_interval, self.config.sh_degree)
+            # breakpoint()
+            if self.config.eval_og: 
+                viewdirs = viewdirs @ self.transform_matrix[:,:3].cuda()
+
             rgbs = SphericalHarmonics.apply(n, viewdirs, colors_crop)
             rgbs = torch.clamp(rgbs + 0.5, 0.0, 1.0)
+            # rgbs = torch.clamp(SH2RGB(rgbs), 0.0, 1.0)
         else:
             rgbs = self.get_colors.squeeze()  # (N, 3)
             rgbs = torch.sigmoid(rgbs)
+
         rgb = RasterizeGaussians.apply(
             self.xys,
             depths,
@@ -644,8 +674,8 @@ class GaussianSplattingModel(Model):
         else:
             gt_img = batch["image"]
         metrics_dict = {}
-        gt_rgb = gt_img.to(self.device)  # RGB or RGBA image
-        # gt_rgb = self.renderer_rgb.blend_background(gt_rgb)  # Blend if RGBA
+        gt_rgb = gt_img.to(self.device)[...,:3]  # RGB or RGBA image
+
         predicted_rgb = outputs["rgb"]
         metrics_dict["psnr"] = self.psnr(predicted_rgb, gt_rgb)
 
@@ -670,6 +700,8 @@ class GaussianSplattingModel(Model):
             gt_img = TF.resize(batch["image"].permute(2, 0, 1), newsize).permute(1, 2, 0)
         else:
             gt_img = batch["image"]
+        
+        gt_img  = gt_img [...,:3]
         Ll1 = torch.abs(gt_img - outputs["rgb"]).mean()
         simloss = 1 - self.ssim(gt_img.permute(2, 0, 1)[None, ...], outputs["rgb"].permute(2, 0, 1)[None, ...])
         if self.step % 10 == 0:
@@ -709,7 +741,8 @@ class GaussianSplattingModel(Model):
         """
         gt_rgb = batch["image"].to(self.device)
         predicted_rgb = outputs["rgb"]  # Blended with background (black if random background)
-
+        # print(gt_rgb.shape)
+        gt_rgb = gt_rgb[...,:3]
         combined_rgb = torch.cat([gt_rgb, predicted_rgb], dim=1)
 
         # Switch images from [H, W, C] to [1, C, H, W] for metrics computations
@@ -750,7 +783,7 @@ class GaussianSplattingModel(Model):
         from plyfile import PlyData, PlyElement
 
         print("\n \n \n saving ply")
-        path = "ply_file_sh_3_final.ply"
+        path = "point_cloud_new_transformed.ply"
 
         xyz = self.means.detach().cpu().numpy()
         normals = np.zeros_like(xyz)
@@ -778,7 +811,7 @@ class GaussianSplattingModel(Model):
         dtype_full = [(attribute, "f4") for attribute in self.construct_list_of_attributes()]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        print(xyz.shape, f_dc.shape, f_rest.shape, opacities.shape, scale.shape, rotation.shape)
+
         attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, "vertex")
